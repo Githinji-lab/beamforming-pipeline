@@ -62,14 +62,23 @@ class BeamCodebook:
         self.codebook = None
         self.simulator = None
     
-    def generate_codebook(self, simulator, num_samples=5000):
-        """Generate codebook via k-means clustering of random beams."""
+    def generate_codebook(self, simulator, num_samples=5000, strategy="random", teacher_keep_ratio=0.35):
+        """Generate codebook via k-means.
+
+        strategy:
+            - "random": cluster random normalized beams
+            - "teacher": cluster near-optimal teacher beams (MMSE/SLNR-best)
+            - "teacher_top": cluster only top-capacity teacher beams
+        """
         from sklearn.cluster import KMeans
         
         self.simulator = simulator
         
-        # Generate random channel matrices and corresponding optimal beams
+        if strategy not in {"random", "teacher", "teacher_top"}:
+            raise ValueError("strategy must be 'random', 'teacher', or 'teacher_top'")
+
         beam_samples = []
+        teacher_capacities = []
         
         print(f"Generating {num_samples} beam samples for codebook...")
         for i in range(num_samples):
@@ -77,26 +86,53 @@ class BeamCodebook:
                 print(f"  Generated {i + 1}/{num_samples}")
             
             H = simulator.generate_channel_matrix_v4()
-            
-            # Generate random beamforming weights
-            W_random = (np.random.randn(self.N_tx, self.K) + 
-                       1j * np.random.randn(self.N_tx, self.K)) / np.sqrt(2)
-            
-            # Normalize per user
-            for k in range(self.K):
-                norm = np.linalg.norm(W_random[:, k])
-                if norm > 1e-9:
-                    W_random[:, k] /= norm
-            
-            # Flatten to feature vector
-            W_flat = np.concatenate([np.real(W_random.flatten()), 
-                                    np.imag(W_random.flatten())])
+
+            if strategy in {"teacher", "teacher_top"}:
+                from preprocessing import calculate_mmse_weights_adjusted
+                from baselines import calculate_slnr_weights_adjusted
+
+                W_mmse = calculate_mmse_weights_adjusted(H, simulator)
+                cap_mmse = simulator.calculate_sum_capacity(H, W_mmse)
+
+                W_slnr = calculate_slnr_weights_adjusted(H, simulator)
+                cap_slnr = simulator.calculate_sum_capacity(H, W_slnr)
+
+                if cap_mmse >= cap_slnr:
+                    W_selected = W_mmse
+                    selected_cap = cap_mmse
+                else:
+                    W_selected = W_slnr
+                    selected_cap = cap_slnr
+
+                teacher_capacities.append(float(selected_cap))
+            else:
+                W_selected = (np.random.randn(self.N_tx, self.K) +
+                              1j * np.random.randn(self.N_tx, self.K)) / np.sqrt(2)
+
+                for k in range(self.K):
+                    norm = np.linalg.norm(W_selected[:, k])
+                    if norm > 1e-9:
+                        W_selected[:, k] /= norm
+
+            W_flat = np.concatenate([np.real(W_selected.flatten()),
+                                     np.imag(W_selected.flatten())])
             beam_samples.append(W_flat)
         
         beam_samples = np.array(beam_samples)
+
+        if strategy == "teacher_top":
+            teacher_capacities = np.array(teacher_capacities)
+            keep_count = max(self.num_beams * 3, int(len(teacher_capacities) * float(teacher_keep_ratio)))
+            keep_count = min(keep_count, len(teacher_capacities))
+            top_indices = np.argsort(teacher_capacities)[-keep_count:]
+            beam_samples = beam_samples[top_indices]
+            print(
+                f"Selected top {keep_count}/{len(teacher_capacities)} teacher beams "
+                f"(keep_ratio={teacher_keep_ratio:.2f}) before clustering."
+            )
         
         # K-means clustering
-        print(f"Clustering {num_samples} beams into {self.num_beams} codebook entries...")
+        print(f"Clustering {beam_samples.shape[0]} {strategy} beams into {self.num_beams} codebook entries...")
         kmeans = KMeans(n_clusters=self.num_beams, random_state=42, n_init=10)
         kmeans.fit(beam_samples)
         

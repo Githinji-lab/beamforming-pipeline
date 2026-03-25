@@ -76,9 +76,11 @@ class SACAgent:
         distribution = tfp.distributions.Normal(loc=mean, scale=std_dev)
         raw_actions = distribution.sample()
         actions = tf.math.tanh(raw_actions)
-        log_prob = distribution.log_prob(raw_actions)
-        log_prob -= tf.reduce_sum(tf.math.log(tf.clip_by_value(1 - actions**2, 1e-6, 1.0)), axis=1)
-        log_prob = tf.reduce_sum(log_prob, axis=-1, keepdims=True)
+
+        log_prob_per_dim = distribution.log_prob(raw_actions)
+        tanh_correction = tf.math.log(tf.clip_by_value(1.0 - tf.square(actions), 1e-6, 1.0))
+        log_prob_per_dim = log_prob_per_dim - tanh_correction
+        log_prob = tf.reduce_sum(log_prob_per_dim, axis=-1, keepdims=True)
         return actions, log_prob
 
     def choose_action(self, state, evaluate=False):

@@ -8,6 +8,8 @@ import time
 script_dir = os.path.dirname(os.path.abspath(__file__))
 src_path = os.path.join(script_dir, '..', 'src')
 sys.path.insert(0, src_path)
+project_root = os.path.abspath(os.path.join(script_dir, '..'))
+results_dir = os.path.join(project_root, 'results')
 
 from simulators import BeamformingSimulatorV4
 from preprocessing import calculate_mmse_weights_adjusted
@@ -35,7 +37,6 @@ def compare_all_baselines(num_eval_iterations=500, save_results=True):
     
     # Initialize results dictionary
     results = {
-        'rl_agent': {'capacities': [], 'sinrs': [], 'latencies': [], 'times': []},
         'mmse': {'capacities': [], 'sinrs': [], 'latencies': [], 'times': []},
         'zf': {'capacities': [], 'sinrs': [], 'latencies': [], 'times': []},
         'mrt': {'capacities': [], 'sinrs': [], 'latencies': [], 'times': []},
@@ -49,14 +50,11 @@ def compare_all_baselines(num_eval_iterations=500, save_results=True):
     codebook = BeamCodebook(N_tx=TARGET_N_TX, K=TARGET_K, num_beams=NUM_BEAMS)
     codebook.generate_codebook(simulator, num_samples=1000)
     
-    # Try to load trained RL model
-    rl_agent = None
-    try:
-        actor_model = tf.keras.models.load_model('../results/sac_actor_model.h5')
-        print("Loaded trained SAC actor model.")
-        rl_agent = actor_model
-    except:
-        print("Warning: Could not load SAC actor model. Skipping RL agent comparison.")
+    actor_model_path = os.path.join(results_dir, 'sac_actor_model.h5')
+    if os.path.exists(actor_model_path):
+        print(f"Detected trained SAC actor model at {actor_model_path}.")
+    else:
+        print("No SAC actor model found in results; running classical baselines only.")
     
     print(f"\nRunning evaluation for {num_eval_iterations} iterations...")
     
@@ -112,8 +110,11 @@ def compare_all_baselines(num_eval_iterations=500, save_results=True):
         t_start = time.time()
         W_random = (np.random.randn(TARGET_N_TX, TARGET_K) + 
                    1j * np.random.randn(TARGET_N_TX, TARGET_K)) / np.sqrt(2)
+        power_per_user = simulator.P_tx_linear / TARGET_K
         for k in range(TARGET_K):
-            W_random[:, k] /= np.linalg.norm(W_random[:, k])
+            norm = np.linalg.norm(W_random[:, k])
+            if norm > 1e-9:
+                W_random[:, k] = (W_random[:, k] / norm) * np.sqrt(power_per_user)
         t_random = time.time() - t_start
         cap_random = simulator.calculate_sum_capacity(H, W_random)
         results['random']['capacities'].append(cap_random)
@@ -127,6 +128,9 @@ def compare_all_baselines(num_eval_iterations=500, save_results=True):
     for method in results.keys():
         caps = results[method]['capacities']
         times = results[method]['times']
+
+        if len(caps) == 0:
+            continue
         
         mean_cap = np.mean(caps)
         std_cap = np.std(caps)
@@ -139,7 +143,8 @@ def compare_all_baselines(num_eval_iterations=500, save_results=True):
     
     # Save results
     if save_results:
-        results_path = '../results/baseline_comparison.pkl'
+        os.makedirs(results_dir, exist_ok=True)
+        results_path = os.path.join(results_dir, 'baseline_comparison.pkl')
         os.makedirs(os.path.dirname(results_path), exist_ok=True)
         with open(results_path, 'wb') as f:
             pickle.dump(results, f)

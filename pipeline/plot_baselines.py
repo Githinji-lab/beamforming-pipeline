@@ -8,10 +8,17 @@ import sys
 script_dir = os.path.dirname(os.path.abspath(__file__))
 src_path = os.path.join(script_dir, '..', 'src')
 sys.path.insert(0, src_path)
+project_root = os.path.abspath(os.path.join(script_dir, '..'))
+results_dir = os.path.join(project_root, 'results')
+data_dir = os.path.join(project_root, 'data')
 
-def plot_baseline_comparison(results_path='../results/baseline_comparison.pkl', 
-                             save_path='../results/baseline_comparison.png'):
+def plot_baseline_comparison(results_path=None, save_path=None):
     """Plot comprehensive baseline comparison."""
+
+    if results_path is None:
+        results_path = os.path.join(results_dir, 'baseline_comparison.pkl')
+    if save_path is None:
+        save_path = os.path.join(results_dir, 'baseline_comparison.png')
     
     if not os.path.exists(results_path):
         print(f"Results file not found: {results_path}")
@@ -50,9 +57,13 @@ def plot_baseline_comparison(results_path='../results/baseline_comparison.pkl',
     plt.show()
 
 
-def plot_capacity_vs_snr(data_path='../data/training_data.pkl',
-                         save_path='../results/capacity_vs_snr.png'):
+def plot_capacity_vs_snr(data_path=None, save_path=None):
     """Plot capacity vs SNR for different methods."""
+
+    if data_path is None:
+        data_path = os.path.join(data_dir, 'training_data.pkl')
+    if save_path is None:
+        save_path = os.path.join(results_dir, 'capacity_vs_snr.png')
     
     if not os.path.exists(data_path):
         print(f"Data file not found: {data_path}")
@@ -82,9 +93,13 @@ def plot_capacity_vs_snr(data_path='../data/training_data.pkl',
     plt.show()
 
 
-def create_comparison_summary_table(results_path='../results/baseline_comparison.pkl',
-                                    output_path='../results/baseline_summary.txt'):
+def create_comparison_summary_table(results_path=None, output_path=None):
     """Create text summary table of baseline comparison."""
+
+    if results_path is None:
+        results_path = os.path.join(results_dir, 'baseline_comparison.pkl')
+    if output_path is None:
+        output_path = os.path.join(results_dir, 'baseline_summary.txt')
     
     if not os.path.exists(results_path):
         print(f"Results file not found: {results_path}")

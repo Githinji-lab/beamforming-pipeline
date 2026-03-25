@@ -1,5 +1,7 @@
 import numpy as np
 from scipy import linalg
+import time
+from preprocessing import calculate_mmse_weights_adjusted
 
 def calculate_zf_weights_adjusted(H, simulator_instance):
     """Zero Forcing beamforming."""
@@ -46,7 +48,7 @@ def calculate_slnr_weights_adjusted(H, simulator_instance):
     
     for k in range(K):
         H_k = np.delete(H, k, axis=0)
-        R_nl = noise_factor * np.eye(N_tx)
+        R_nl = noise_factor * np.eye(N_tx, dtype=complex)
         if H_k.size > 0:
             R_nl += H_k.conj().T @ H_k
         
@@ -67,7 +69,7 @@ def calculate_slnr_weights_adjusted(H, simulator_instance):
     for k in range(K):
         norm = np.linalg.norm(W[:, k])
         if norm > 1e-9:
-            W[:, k] /= norm * np.sqrt(power_per_user)
+            W[:, k] = (W[:, k] / norm) * np.sqrt(power_per_user)
     
     return W
 
@@ -87,10 +89,39 @@ def calculate_greedy_codebook_beam(H, codebook, simulator_instance):
     return codebook.get_beam(best_beam_idx)
 
 
-def calculate_multi_objective_reward(H, W, simulator_instance, 
-                                     alpha=0.6, beta=0.3, gamma=0.1,
-                                     target_snr=15.0):
-    """Multi-objective reward: throughput - latency_penalty - ber_penalty."""
+def _flatten_beam_complex(W):
+    return np.concatenate([np.real(W.flatten()), np.imag(W.flatten())])
+
+
+def nearest_codebook_index_from_beam(W, codebook):
+    if codebook.codebook is None:
+        raise ValueError("Codebook not generated. Call generate_codebook() first.")
+    target = _flatten_beam_complex(W)
+    distances = np.linalg.norm(codebook.codebook - target.reshape(1, -1), axis=1)
+    return int(np.argmin(distances))
+
+
+def select_teacher_beam_index(H, simulator_instance, codebook):
+    W_mmse = calculate_mmse_weights_adjusted(H, simulator_instance)
+    cap_mmse = simulator_instance.calculate_sum_capacity(H, W_mmse)
+
+    W_slnr = calculate_slnr_weights_adjusted(H, simulator_instance)
+    cap_slnr = simulator_instance.calculate_sum_capacity(H, W_slnr)
+
+    W_teacher = W_mmse if cap_mmse >= cap_slnr else W_slnr
+    return nearest_codebook_index_from_beam(W_teacher, codebook)
+
+
+def calculate_multi_objective_reward(H, W, simulator_instance,
+                                     alpha=0.6, beta=0.2, gamma=0.1,
+                                     target_snr=15.0,
+                                     inference_latency_ms=0.0,
+                                     latency_budget_ms=1.0,
+                                     latency_budget_weight=0.8):
+    """Multi-objective reward with constrained latency penalty.
+
+    Reward = alpha*throughput - beta*stability_penalty - gamma*ber_penalty - budget_latency_penalty
+    """
     
     # Calculate capacity (throughput objective)
     path_loss_db = simulator_instance.calculate_path_loss_3gpp()
@@ -116,19 +147,28 @@ def calculate_multi_objective_reward(H, W, simulator_instance,
     ber = 0.5 * np.exp(-min_sinr)
     ber_penalty = -np.log10(ber + 1e-10)  # Higher BER = lower penalty magnitude
     
-    # Latency penalty (W change magnitude - prefer stable beams)
+    # Stability penalty (prefer smoother/less extreme beams)
     W_norm = np.linalg.norm(W) + 1e-9
-    latency_penalty = W_norm
+    stability_penalty = W_norm
+
+    # Constrained latency penalty: only penalize over-budget inference
+    over_budget_ms = max(0.0, float(inference_latency_ms) - float(latency_budget_ms))
+    budget_latency_penalty = latency_budget_weight * over_budget_ms
     
     # Multi-objective reward
     reward = (alpha * throughput 
-             - beta * latency_penalty 
-             - gamma * ber_penalty)
+             - beta * stability_penalty
+             - gamma * ber_penalty
+             - budget_latency_penalty)
     
     return reward, {
         'throughput': throughput,
         'avg_sinr': avg_sinr,
         'min_sinr': min_sinr,
         'ber': ber,
-        'latency_norm': latency_penalty
+        'stability_penalty': stability_penalty,
+        'inference_latency_ms': float(inference_latency_ms),
+        'latency_budget_ms': float(latency_budget_ms),
+        'over_budget_ms': over_budget_ms,
+        'budget_latency_penalty': budget_latency_penalty
     }
