@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+
+# OS/editor
+.DS_Store
+*.swp
+*.swo
+
+# Generated data/extractions
+data/external/
+data/tmp_zip_test/
+data/*.zip
+
+# Result snapshots
+results_snapshot_*/
+results_snapshot_before_long_train*/
+results_snapshot_after_long_train*/
+
+# Generated benchmark artifacts (keep defense/protocol packages)
+results/*.json
+results/*.png
+results/*.npy
+results/*.keras
+results/*.h5
+results/*.tflite
+results/*.pkl
+!results/defense/**
+!results/protocol/**
+!results/sweeps/**
+
+# Temporary model export dirs
+/tmp/

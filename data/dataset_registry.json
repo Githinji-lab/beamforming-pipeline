@@ -1,0 +1,53 @@
+{
+  "updated_at": "2026-04-06T10:00:58.406140Z",
+  "output_root": "/home/anon/Downloads/Beamforming-project-pipeline/data/external",
+  "archives": [
+    {
+      "zip_path": "/home/anon/Downloads/Beamforming-project-pipeline/data/beam_selection.zip",
+      "zip_sha256": "be41481a4cccf5b984b50e7af9411dc4e08d4fc6c4895bc39764fe00c7c87563",
+      "extracted_dir": "/home/anon/Downloads/Beamforming-project-pipeline/data/external/beam_selection",
+      "extracted_file_count": 8,
+      "dataset_file_count": 5,
+      "dataset_files": [
+        "/home/anon/Downloads/Beamforming-project-pipeline/data/external/beam_selection/beam_selection/beam_output/beams_output.npz",
+        "/home/anon/Downloads/Beamforming-project-pipeline/data/external/beam_selection/beam_selection/beam_output/beams_output_no_ori.npz",
+        "/home/anon/Downloads/Beamforming-project-pipeline/data/external/beam_selection/beam_selection/coord_input/coord_input.npz",
+        "/home/anon/Downloads/Beamforming-project-pipeline/data/external/beam_selection/beam_selection/image_input/img_input_20.npz",
+        "/home/anon/Downloads/Beamforming-project-pipeline/data/external/beam_selection/beam_selection/lidar_input/lidar_input.npz"
+      ]
+    },
+    {
+      "zip_path": "/home/anon/Downloads/Beamforming-project-pipeline/data/channel_estimation.zip",
+      "zip_sha256": "3e49fdd58afe24c43f0b376c4a666988a126b9a26484210b2dc5b3c63caf914c",
+      "extracted_dir": "/home/anon/Downloads/Beamforming-project-pipeline/data/external/channel_estimation",
+      "extracted_file_count": 5,
+      "dataset_file_count": 5,
+      "dataset_files": [
+        "/home/anon/Downloads/Beamforming-project-pipeline/data/external/channel_estimation/channel_estimation/mimo_fixed.mat",
+        "/home/anon/Downloads/Beamforming-project-pipeline/data/external/channel_estimation/channel_estimation/random_geo.mat",
+        "/home/anon/Downloads/Beamforming-project-pipeline/data/external/channel_estimation/channel_estimation/random_geo_nominal.mat",
+        "/home/anon/Downloads/Beamforming-project-pipeline/data/external/channel_estimation/channel_estimation/siso_correct.mat",
+        "/home/anon/Downloads/Beamforming-project-pipeline/data/external/channel_estimation/channel_estimation/siso_fixed.mat"
+      ]
+    }
+  ],
+  "dataset_files": [
+    "/home/anon/Downloads/Beamforming-project-pipeline/data/external/beam_selection/beam_selection/beam_output/beams_output.npz",
+    "/home/anon/Downloads/Beamforming-project-pipeline/data/external/beam_selection/beam_selection/beam_output/beams_output_no_ori.npz",
+    "/home/anon/Downloads/Beamforming-project-pipeline/data/external/beam_selection/beam_selection/coord_input/coord_input.npz",
+    "/home/anon/Downloads/Beamforming-project-pipeline/data/external/beam_selection/beam_selection/image_input/img_input_20.npz",
+    "/home/anon/Downloads/Beamforming-project-pipeline/data/external/beam_selection/beam_selection/lidar_input/lidar_input.npz",
+    "/home/anon/Downloads/Beamforming-project-pipeline/data/external/channel_estimation/channel_estimation/mimo_fixed.mat",
+    "/home/anon/Downloads/Beamforming-project-pipeline/data/external/channel_estimation/channel_estimation/random_geo.mat",
+    "/home/anon/Downloads/Beamforming-project-pipeline/data/external/channel_estimation/channel_estimation/random_geo_nominal.mat",
+    "/home/anon/Downloads/Beamforming-project-pipeline/data/external/channel_estimation/channel_estimation/siso_correct.mat",
+    "/home/anon/Downloads/Beamforming-project-pipeline/data/external/channel_estimation/channel_estimation/siso_fixed.mat"
+  ],
+  "supported_extensions": [
+    ".csv",
+    ".mat",
+    ".npy",
+    ".npz",
+    ".pkl"
+  ]
+}

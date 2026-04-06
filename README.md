@@ -1,104 +1,221 @@
 # Beamforming ML Pipeline
 
-This project implements a machine learning pipeline for optimizing beamforming in 5G wireless communication systems using reinforcement learning (SAC - Soft Actor-Critic).
+Adaptive beam selection pipeline for 5G-like MIMO channels with a focus on **sum capacity** and **low-latency inference**.
 
-## Project Structure
+## Project Objectives
 
-```
+This project targets:
+- **Lightweight AI approach** for practical deployment
+- **Real-time adaptive beam selection**
+- **Clustering + RL** architecture
+- Evaluation on **SINR, BER, throughput, latency**
+
+## Current Status vs Objectives
+
+- ✅ **Low-latency deployable models** (`.tflite`) are working
+- ✅ **Teacher-informed codebook + RL selectors** are implemented
+- ✅ **Benchmark harness** compares classical and learned methods
+- ⚠️ **Sum-capacity parity vs MMSE/ZF** is still under active tuning
+
+## Repository Structure
+
+```text
 beamforming-project-pipeline/
-├── main.py                 # Main entry point
-├── requirements.txt        # Python dependencies
-├── data/                   # Generated training data
-├── results/                # Training results and models
-├── src/                    # Source code
-│   ├── simulators.py       # Beamforming simulators (V4, V5)
-│   ├── agents.py           # RL agents (SAC, etc.)
-│   ├── utils.py            # Utilities (ReplayBuffer, etc.)
-│   └── preprocessing.py    # Data preprocessing functions
-└── pipeline/               # Pipeline scripts
-    ├── data_gen.py         # Data generation
-    ├── train.py            # Training script
-    ├── evaluate.py         # Evaluation script
-    └── visualize.py        # Visualization tools
+├── data/
+├── results/
+├── src/
+│   ├── simulators.py
+│   ├── agents.py
+│   ├── dqn_beam_agent.py
+│   ├── baselines.py
+│   ├── state_encoder.py
+│   ├── preprocessing.py
+│   └── domain_randomization.py
+├── pipeline/
+│   ├── data_gen.py
+│   ├── train.py
+│   ├── train_improved.py
+│   ├── train_dqn_beam.py
+│   ├── baseline_comparison.py
+│   ├── benchmark_optimized.py
+│   ├── evaluate.py
+│   └── plot_baselines.py
+├── requirements.txt
+└── README.md
 ```
 
 ## Setup
 
-1. Install dependencies:
 ```bash
+cd /home/anon/Downloads/Beamforming-project-pipeline
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-2. Run the main script to see available commands:
-```bash
-python main.py
-```
+## Method Summary
 
-## Usage
+### 1) Teacher-Derived Codebook (capacity-focused)
+- Build beams using **MMSE/SLNR teacher solutions**
+- Keep top-capacity teacher beams (`teacher_top`)
+- Cluster them into deployable codebook entries
 
-### Generate Training Data
+### 2) RL Selectors
+- **SAC path**: latency-constrained reward + imitation warm-start + distilled student
+- **DQN path**: discrete beam-index selector (better action-space match)
+
+### 3) Deployment
+- Export lightweight inference models (`.keras`, `.tflite`)
+- Benchmark with latency and capacity on held-out channels
+
+## Reproducible Workflows
+
+### Data generation
 ```bash
 python pipeline/data_gen.py
 ```
 
-### Train SAC Agent
+### Add external dataset zip archives
 ```bash
-python pipeline/train.py
+python pipeline/add_dataset_zip.py \
+    --zip /path/to/dataset_a.zip \
+    --zip /path/to/dataset_b.zip
 ```
 
-### Train Optimized SAC (Latency-Constrained + Imitation + Distillation)
+This extracts archives under `data/external/` and writes a registry to `data/dataset_registry.json`.
+
+### Optimized SAC training
 ```bash
 python pipeline/train_improved.py
 ```
 
-By default this uses a refined teacher-derived codebook (`teacher_top`):
-- generate MMSE/SLNR teacher beams,
-- keep only top-capacity beams,
-- cluster with KMeans into deployable beam entries.
-
-This run now includes:
-- constrained reward with latency budget penalty,
-- imitation warm-start from MMSE/SLNR teacher beams,
-- lightweight student distillation and quantized TFLite export.
-
-### Evaluate Trained Agent
+### DQN beam training (recommended)
 ```bash
-python pipeline/evaluate.py
+python pipeline/train_dqn_beam.py \
+    --episodes 120 \
+    --steps 50 \
+    --batch-size 64 \
+    --imitation-samples 500 \
+    --imitation-epochs 6 \
+    --codebook-strategy teacher_top \
+    --codebook-keep-ratio 0.25 \
+    --dataset-zips /path/to/dataset_a.zip,/path/to/dataset_b.zip
 ```
 
-### Benchmark Capacity and Latency (Traditional vs Optimized RL)
+### Dataset-backed training (external channels)
+```bash
+python pipeline/train_dqn_beam.py \
+    --episodes 10 \
+    --steps 20 \
+    --batch-size 32 \
+    --imitation-samples 120 \
+    --imitation-epochs 2 \
+    --channel-source external \
+    --external-registry data/dataset_registry.json \
+    --external-max-samples 5000
+```
+
+Channel source options:
+- `simulator`: synthetic channels only (default)
+- `external`: channels from `data/dataset_registry.json`
+- `mixed`: blend simulator and external channels using `--external-mix-ratio`
+
+### Baseline/optimized benchmark
 ```bash
 python pipeline/benchmark_optimized.py
 ```
 
-### Train Discrete DQN Beam Selector (SAC-compatible hybrid path)
+Custom iterations and JSON export:
 ```bash
-python pipeline/train_dqn_beam.py
+python pipeline/benchmark_optimized.py --iterations 200 --json-out results/benchmark_custom.json
 ```
 
-Quick smoke run:
+Benchmark on external dataset channels:
 ```bash
-python pipeline/train_dqn_beam.py --episodes 10 --steps 20 --batch-size 32 --imitation-samples 120 --imitation-epochs 2
+python pipeline/benchmark_optimized.py \
+    --iterations 200 \
+    --channel-source external \
+    --external-registry data/dataset_registry.json \
+    --external-max-samples 5000 \
+    --json-out results/benchmark_external.json
 ```
 
-Optional baseline ablation (random codebook):
+Benchmark now reports (per method):
+- Capacity mean/std
+- Latency mean/P95
+- SINR mean (dB)
+- BER mean
+
+### Quick smoke test
 ```bash
-python pipeline/train_dqn_beam.py --codebook-strategy random
+python pipeline/train_dqn_beam.py \
+    --episodes 4 \
+    --steps 10 \
+    --batch-size 16 \
+    --imitation-samples 60 \
+    --imitation-epochs 1 \
+    --codebook-strategy teacher_top \
+    --codebook-keep-ratio 0.25
 ```
 
-Capacity-focused refined codebook tuning:
+### Teacher-top keep-ratio sweep (capacity tuning)
 ```bash
-python pipeline/train_dqn_beam.py --codebook-strategy teacher_top --codebook-keep-ratio 0.25
+python pipeline/sweep_dqn_keep_ratio.py \
+    --ratios 0.10,0.15,0.20,0.30 \
+    --episodes 240 \
+    --steps 60 \
+    --batch-size 128 \
+    --imitation-samples 1200 \
+    --imitation-epochs 8 \
+    --benchmark-iterations 200 \
+    --dataset-zips /path/to/dataset_a.zip,/path/to/dataset_b.zip \
+    --channel-source mixed \
+    --external-registry data/dataset_registry.json \
+    --external-mix-ratio 0.5
 ```
 
-### Visualize Results
+### Defense-ready clean results package
+Run fixed protocol first (locked seeds/iterations/source, 3-run stats + CI, ablations):
 ```bash
-python pipeline/visualize.py
+python pipeline/run_defense_protocol.py \
+    --iterations 120 \
+    --seeds 11,22,33 \
+    --channel-source external \
+    --dqn-rerank-topk 3 \
+    --out-dir results/protocol
 ```
 
-## Optimized Artifacts
+Optional teacher-top ratio ablation:
+```bash
+python pipeline/run_defense_protocol.py \
+    --iterations 120 \
+    --seeds 11,22,33 \
+    --channel-source external \
+    --dqn-rerank-topk 3 \
+    --run-teacher-ratio-ablation \
+    --teacher-ratios 0.20,0.30,0.35 \
+    --out-dir results/protocol
+```
 
-After running `pipeline/train_improved.py`, these artifacts are generated in `results/`:
+Then build the clean defense package:
+```bash
+python pipeline/prepare_defense_results.py
+```
+
+This creates a clean folder `results/defense/` with:
+- `primary_benchmark_protocol.json` (locked protocol settings)
+- `headline_table.csv` (3-run mean/std/95% CI)
+- `ablation_table.csv` (topk, dataset on/off, teacher_top ratio)
+- `objective_summary.json` (objective % completion and selected top-k)
+- `objective_scores.csv`
+- `objective_progress.png`
+- `topk_tradeoff.png`
+- `selected_method_comparison.png`
+- `results_claims_clean.txt`
+
+## Main Artifacts (in `results/`)
+
+### SAC artifacts
 - `improved_sac_actor_model.keras`
 - `improved_sac_actor_model.h5`
 - `improved_sac_student.keras`
@@ -107,7 +224,7 @@ After running `pipeline/train_improved.py`, these artifacts are generated in `re
 - `improved_sac_latency_ms.npy`
 - `beam_codebook.pkl`
 
-After running `pipeline/train_dqn_beam.py`, these artifacts are generated in `results/`:
+### DQN artifacts
 - `dqn_beam_model.keras`
 - `dqn_beam_model_int8.tflite`
 - `dqn_beam_artifacts.pkl`
@@ -115,21 +232,31 @@ After running `pipeline/train_dqn_beam.py`, these artifacts are generated in `re
 - `dqn_beam_latency_p95_ms.npy`
 - `dqn_beam_training.png`
 
-## Key Components
+## Reporting Template (for submission)
 
-- **BeamformingSimulatorV4**: Realistic 5G channel simulation with 3GPP path loss models
-- **SACAgent**: Soft Actor-Critic agent for beamforming optimization
-- **Preprocessing**: Channel state and action preprocessing for RL
-- **Evaluation**: Performance comparison against traditional methods (MMSE)
+Use this table format after each benchmark run:
 
-## Features
+| Method | Capacity Mean | Capacity Std | Latency Mean (ms) | Latency P95 (ms) |
+|---|---:|---:|---:|---:|
+| MMSE |  |  |  |  |
+| ZF |  |  |  |  |
+| SAC Teacher |  |  |  |  |
+| SAC Student TFLite |  |  |  |  |
+| DQN |  |  |  |  |
+| DQN TFLite |  |  |  |  |
 
-- Realistic 3GPP-inspired channel modeling
-- Reinforcement learning for adaptive beamforming
-- Reward shaping for better convergence
-- Comprehensive evaluation and visualization
-- Modular, organized codebase
+## Interpretation Guidance
 
-## Results
+- If capacity is still below MMSE, report efficiency as:
+    - **“ML achieves X% of MMSE capacity with Y% lower inference latency.”**
+- For fairness, compare all methods on:
+    - same channel seeds,
+    - same evaluation iterations,
+    - same hardware/runtime context.
 
-The SAC agent learns to optimize beamforming weights to maximize sum capacity in multi-user MIMO systems, outperforming traditional methods in dynamic environments.
+## Next Capacity Uplift Levers
+
+1. Sweep `--codebook-keep-ratio` (`0.10, 0.15, 0.20, 0.30`)
+2. Increase teacher sample volume for codebook generation
+3. Longer DQN training with curriculum scenarios
+4. Top-k beam reranking at inference time

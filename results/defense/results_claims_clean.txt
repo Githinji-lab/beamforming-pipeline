@@ -1,0 +1,4 @@
+Results Claims (No Before/After Framing)
+=======================================
+Latency success: achieved (DQN TFLite mean latency < 1 ms).
+Capacity parity: not achieved yet; still in progress against MMSE/ZF.

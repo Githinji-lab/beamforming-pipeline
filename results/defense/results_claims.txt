@@ -1,0 +1,4 @@
+Results Claims (Defense)
+========================
+Latency success: mean latency is 0.531 ms (<1 ms target).
+Capacity parity: still in progress (current dqn_tflite cap_mean=1.764).

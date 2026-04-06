@@ -19,6 +19,8 @@ from state_encoder import ChannelStateEncoder, BeamCodebook
 from baselines import calculate_multi_objective_reward, select_teacher_beam_index
 from domain_randomization import DomainRandomizer
 from dqn_beam_agent import DQNBeamAgent
+from dataset_ingestion import ingest_dataset_zips
+from external_dataset import load_channels_from_registry, ExternalChannelSampler
 
 
 def train_dqn_beam(
@@ -34,9 +36,49 @@ def train_dqn_beam(
     use_domain_randomization=True,
     codebook_strategy="teacher_top",
     codebook_keep_ratio=0.35,
+    dataset_zip_paths=None,
+    channel_source="simulator",
+    external_registry_path="data/dataset_registry.json",
+    external_max_samples=20000,
+    external_mix_ratio=0.5,
 ):
+    if dataset_zip_paths:
+        ingest_info = ingest_dataset_zips(
+            zip_paths=dataset_zip_paths,
+            output_root="data/external",
+            manifest_path="data/dataset_registry.json",
+        )
+        print(
+            f"Ingested {len(ingest_info['archives'])} zip archive(s), "
+            f"discovered {len(ingest_info['dataset_files'])} dataset file(s)."
+        )
+
     simulator = BeamformingSimulatorV4(N_tx=8, K=4)
     randomizer = DomainRandomizer(simulator) if use_domain_randomization else None
+    external_sampler = None
+
+    if channel_source in ("external", "mixed"):
+        channels = load_channels_from_registry(
+            registry_path=external_registry_path,
+            target_k=simulator.K,
+            target_n_tx=simulator.N_tx,
+            max_total_samples=external_max_samples,
+        )
+        external_sampler = ExternalChannelSampler(channels)
+        print(f"Loaded external channels: {channels.shape[0]}")
+
+    def sample_channel(domain_randomized=False):
+        if channel_source == "external":
+            return external_sampler.sample()
+        if channel_source == "mixed":
+            if np.random.rand() < external_mix_ratio:
+                return external_sampler.sample()
+            if domain_randomized and randomizer is not None and np.random.rand() < 0.3:
+                return randomizer.generate_randomized_channel()
+            return simulator.generate_channel_matrix_v4()
+        if domain_randomized and randomizer is not None and np.random.rand() < 0.3:
+            return randomizer.generate_randomized_channel()
+        return simulator.generate_channel_matrix_v4()
 
     print("=" * 60)
     print("DQN BEAM TRAINING (DISCRETE ACTIONS)")
@@ -44,6 +86,7 @@ def train_dqn_beam(
     print(f"num_beams={num_beams}, encoded_dim={encoded_dim}")
     print(f"codebook_strategy={codebook_strategy}")
     print(f"codebook_keep_ratio={codebook_keep_ratio}")
+    print(f"channel_source={channel_source}")
     print(f"latency budget={latency_budget_ms} ms")
 
     codebook = BeamCodebook(N_tx=8, K=4, num_beams=num_beams)
@@ -55,7 +98,7 @@ def train_dqn_beam(
     )
 
     encoder = ChannelStateEncoder(target_dim=encoded_dim)
-    H_fit = np.array([simulator.generate_channel_matrix_v4() for _ in range(600)])
+    H_fit = np.array([sample_channel(domain_randomized=False) for _ in range(600)])
     snr_fit = np.random.choice(simulator.snr_db_list, 600)
     encoder.fit(H_fit, snr_fit)
 
@@ -78,7 +121,7 @@ def train_dqn_beam(
     im_states = []
     im_actions = []
     for _ in range(imitation_samples):
-        H = simulator.generate_channel_matrix_v4()
+        H = sample_channel(domain_randomized=False)
         snr = np.random.choice(simulator.snr_db_list)
         im_states.append(encoder.encode(H, snr))
         im_actions.append(select_teacher_beam_index(H, simulator, codebook))
@@ -89,7 +132,7 @@ def train_dqn_beam(
     p95_latency_history = []
 
     for ep in range(num_episodes):
-        H = simulator.generate_channel_matrix_v4()
+        H = sample_channel(domain_randomized=False)
         snr = simulator.snr_db_list[len(simulator.snr_db_list) // 2]
         state = scaler.transform(encoder.encode(H, snr).reshape(1, -1))[0]
 
@@ -115,10 +158,7 @@ def train_dqn_beam(
                 latency_budget_weight=latency_budget_weight,
             )
 
-            if randomizer is not None and np.random.rand() < 0.3:
-                H_next = randomizer.generate_randomized_channel()
-            else:
-                H_next = simulator.generate_channel_matrix_v4()
+            H_next = sample_channel(domain_randomized=True)
 
             next_state = scaler.transform(encoder.encode(H_next, snr).reshape(1, -1))[0]
             done = (t == max_steps - 1)
@@ -192,6 +232,16 @@ def parse_args():
     p.add_argument("--latency-budget-ms", type=float, default=1.0)
     p.add_argument("--codebook-strategy", type=str, default="teacher_top", choices=["teacher_top", "teacher", "random"])
     p.add_argument("--codebook-keep-ratio", type=float, default=0.35)
+    p.add_argument(
+        "--dataset-zips",
+        type=str,
+        default="",
+        help="Comma-separated zip archive paths to ingest before training.",
+    )
+    p.add_argument("--channel-source", type=str, default="simulator", choices=["simulator", "external", "mixed"])
+    p.add_argument("--external-registry", type=str, default="data/dataset_registry.json")
+    p.add_argument("--external-max-samples", type=int, default=20000)
+    p.add_argument("--external-mix-ratio", type=float, default=0.5)
     return p.parse_args()
 
 
@@ -207,4 +257,9 @@ if __name__ == "__main__":
         latency_budget_ms=args.latency_budget_ms,
         codebook_strategy=args.codebook_strategy,
         codebook_keep_ratio=args.codebook_keep_ratio,
+        dataset_zip_paths=[z.strip() for z in args.dataset_zips.split(",") if z.strip()],
+        channel_source=args.channel_source,
+        external_registry_path=args.external_registry,
+        external_max_samples=args.external_max_samples,
+        external_mix_ratio=args.external_mix_ratio,
     )

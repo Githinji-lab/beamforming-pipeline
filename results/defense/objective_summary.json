@@ -1,0 +1,18 @@
+{
+  "capacity_parity_pct": 5.421737171327535,
+  "latency_realtime_pct": 100.0,
+  "architecture_completion_pct": 100.0,
+  "evaluation_coverage_pct": 100.0,
+  "implementation_readiness_pct": 100.0,
+  "performance_competitiveness_pct": 5.421737171327535,
+  "overall_completion_pct": 57.4397817270974,
+  "selected_dqn_tflite": {
+    "cap_mean": 1.792522474135591,
+    "lat_mean_ms": 0.670732766650417,
+    "lat_p95_ms": 1.5157947500142652,
+    "sinr_mean_db": -8.078311060544669,
+    "ber_mean": 0.39172356090917665
+  },
+  "selected_topk": 3,
+  "latency_constraint": "dqn_beam_tflite lat_mean_ms < 1.0"
+}

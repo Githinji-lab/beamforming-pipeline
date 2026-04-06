@@ -1,0 +1,8 @@
+{
+  "iterations": 20,
+  "channel_source": "external",
+  "external_registry": "data/dataset_registry.json",
+  "external_max_samples": 5000,
+  "external_mix_ratio": 0.5,
+  "dqn_rerank_topk": 3
+}

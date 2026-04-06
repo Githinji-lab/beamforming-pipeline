@@ -2,6 +2,8 @@ import os
 import sys
 import time
 import pickle
+import json
+import argparse
 import numpy as np
 import tensorflow as tf
 
@@ -12,6 +14,7 @@ sys.path.insert(0, src_path)
 from simulators import BeamformingSimulatorV4
 from preprocessing import calculate_mmse_weights_adjusted
 from baselines import calculate_zf_weights_adjusted
+from external_dataset import load_channels_from_registry, ExternalChannelSampler
 
 
 def _run_tflite(interpreter, input_data):
@@ -22,7 +25,100 @@ def _run_tflite(interpreter, input_data):
     return interpreter.get_tensor(output_details[0]['index'])
 
 
-def benchmark(num_iterations=200):
+def _compute_sinr_ber(simulator, H, W):
+    path_loss_linear = 10 ** (-simulator.calculate_path_loss_3gpp() / 10)
+    sinrs = []
+    K = H.shape[0]
+    for k in range(K):
+        sig = simulator.P_tx_linear * path_loss_linear * np.abs(H[k, :] @ W[:, k]) ** 2
+        intf = sum(
+            simulator.P_tx_linear * path_loss_linear * np.abs(H[k, :] @ W[:, j]) ** 2
+            for j in range(K)
+            if j != k
+        )
+        sinr = float(sig / (intf + simulator.noise_power_linear + 1e-10))
+        sinrs.append(sinr)
+
+    sinrs = np.array(sinrs, dtype=np.float64)
+    avg_sinr_lin = float(np.mean(sinrs))
+    min_sinr_lin = float(np.min(sinrs))
+    avg_sinr_db = float(10.0 * np.log10(avg_sinr_lin + 1e-10))
+    min_sinr_db = float(10.0 * np.log10(min_sinr_lin + 1e-10))
+
+    # QPSK-like approximation
+    ber_users = 0.5 * np.exp(-sinrs)
+    avg_ber = float(np.mean(ber_users))
+    return avg_sinr_db, min_sinr_db, avg_ber
+
+
+def _proxy_capacity_score(simulator, H, W):
+    capacities = []
+    K = H.shape[0]
+    for k in range(K):
+        sig = simulator.P_tx_linear * np.abs(H[k, :] @ W[:, k]) ** 2
+        intf = sum(
+            simulator.P_tx_linear * np.abs(H[k, :] @ W[:, j]) ** 2
+            for j in range(K)
+            if j != k
+        )
+        capacities.append(np.log2(1 + sig / (intf + simulator.noise_power_linear + 1e-10)))
+    return float(np.sum(capacities))
+
+
+def _rerank_beam_idx_from_qvals(simulator, H, qvals, codebook, topk):
+    if topk <= 1:
+        return int(np.argmax(qvals))
+
+    k = min(int(topk), len(qvals))
+    candidate_indices = np.argpartition(qvals, -k)[-k:]
+
+    best_idx = int(candidate_indices[0])
+    best_score = -np.inf
+    for idx in candidate_indices:
+        W = codebook.get_beam(int(idx))
+        score = _proxy_capacity_score(simulator, H, W)
+        if score > best_score:
+            best_score = score
+            best_idx = int(idx)
+    return best_idx
+
+
+def _summarize_stats(stats):
+    summary = {}
+    for method, d in stats.items():
+        if len(d['capacity']) == 0:
+            continue
+        cap = np.array(d['capacity'], dtype=np.float64)
+        lat = np.array(d['latency_ms'], dtype=np.float64)
+        sinr = np.array(d['sinr_db'], dtype=np.float64)
+        ber = np.array(d['ber'], dtype=np.float64)
+        summary[method] = {
+            'cap_mean': float(cap.mean()),
+            'cap_std': float(cap.std()),
+            'lat_mean_ms': float(lat.mean()),
+            'lat_p95_ms': float(np.percentile(lat, 95)),
+            'sinr_mean_db': float(sinr.mean()),
+            'sinr_p05_db': float(np.percentile(sinr, 5)),
+            'ber_mean': float(ber.mean()),
+            'ber_p95': float(np.percentile(ber, 95)),
+        }
+    return summary
+
+
+def benchmark(
+    num_iterations=200,
+    save_json_path=None,
+    channel_source='simulator',
+    external_registry_path='data/dataset_registry.json',
+    external_max_samples=20000,
+    external_mix_ratio=0.5,
+    dqn_rerank_topk=1,
+    seed=None,
+):
+    if seed is not None:
+        np.random.seed(int(seed))
+        tf.random.set_seed(int(seed))
+
     project_root = os.path.abspath(os.path.join(script_dir, '..'))
     results_dir = os.path.join(project_root, 'results')
 
@@ -60,29 +156,55 @@ def benchmark(num_iterations=200):
             dqn_artifacts = pickle.load(f)
 
     simulator = BeamformingSimulatorV4(N_tx=8, K=4)
+    external_sampler = None
+
+    if channel_source in ('external', 'mixed'):
+        channels = load_channels_from_registry(
+            registry_path=external_registry_path,
+            target_k=simulator.K,
+            target_n_tx=simulator.N_tx,
+            max_total_samples=external_max_samples,
+        )
+        external_sampler = ExternalChannelSampler(channels, seed=seed if seed is not None else 42)
+        print(f"Loaded external channels for benchmark: {channels.shape[0]}")
+
+    def sample_channel():
+        if channel_source == 'external':
+            return external_sampler.sample()
+        if channel_source == 'mixed':
+            if np.random.rand() < external_mix_ratio:
+                return external_sampler.sample()
+            return simulator.generate_channel_matrix_v4()
+        return simulator.generate_channel_matrix_v4()
 
     stats = {
-        'mmse': {'capacity': [], 'latency_ms': []},
-        'zf': {'capacity': [], 'latency_ms': []},
-        'rl_teacher': {'capacity': [], 'latency_ms': []},
-        'rl_student_tflite': {'capacity': [], 'latency_ms': []},
-        'dqn_beam': {'capacity': [], 'latency_ms': []},
-        'dqn_beam_tflite': {'capacity': [], 'latency_ms': []},
+        'mmse': {'capacity': [], 'latency_ms': [], 'sinr_db': [], 'ber': []},
+        'zf': {'capacity': [], 'latency_ms': [], 'sinr_db': [], 'ber': []},
+        'rl_teacher': {'capacity': [], 'latency_ms': [], 'sinr_db': [], 'ber': []},
+        'rl_student_tflite': {'capacity': [], 'latency_ms': [], 'sinr_db': [], 'ber': []},
+        'dqn_beam': {'capacity': [], 'latency_ms': [], 'sinr_db': [], 'ber': []},
+        'dqn_beam_tflite': {'capacity': [], 'latency_ms': [], 'sinr_db': [], 'ber': []},
     }
 
     for i in range(num_iterations):
-        H = simulator.generate_channel_matrix_v4()
+        H = sample_channel()
         snr = simulator.snr_db_list[len(simulator.snr_db_list) // 2]
 
         t0 = time.perf_counter()
         W_mmse = calculate_mmse_weights_adjusted(H, simulator)
         stats['mmse']['latency_ms'].append((time.perf_counter() - t0) * 1000)
         stats['mmse']['capacity'].append(simulator.calculate_sum_capacity(H, W_mmse))
+        sinr_db, _, ber = _compute_sinr_ber(simulator, H, W_mmse)
+        stats['mmse']['sinr_db'].append(sinr_db)
+        stats['mmse']['ber'].append(ber)
 
         t0 = time.perf_counter()
         W_zf = calculate_zf_weights_adjusted(H, simulator)
         stats['zf']['latency_ms'].append((time.perf_counter() - t0) * 1000)
         stats['zf']['capacity'].append(simulator.calculate_sum_capacity(H, W_zf))
+        sinr_db, _, ber = _compute_sinr_ber(simulator, H, W_zf)
+        stats['zf']['sinr_db'].append(sinr_db)
+        stats['zf']['ber'].append(ber)
 
         encoded = state_encoder.encode(H, snr).reshape(1, -1)
 
@@ -94,6 +216,9 @@ def benchmark(num_iterations=200):
             W_rl = codebook.get_beam(beam_idx)
             stats['rl_teacher']['latency_ms'].append((time.perf_counter() - t0) * 1000)
             stats['rl_teacher']['capacity'].append(simulator.calculate_sum_capacity(H, W_rl))
+            sinr_db, _, ber = _compute_sinr_ber(simulator, H, W_rl)
+            stats['rl_teacher']['sinr_db'].append(sinr_db)
+            stats['rl_teacher']['ber'].append(ber)
 
         if interpreter is not None:
             t0 = time.perf_counter()
@@ -102,6 +227,9 @@ def benchmark(num_iterations=200):
             W_st = codebook.get_beam(beam_idx)
             stats['rl_student_tflite']['latency_ms'].append((time.perf_counter() - t0) * 1000)
             stats['rl_student_tflite']['capacity'].append(simulator.calculate_sum_capacity(H, W_st))
+            sinr_db, _, ber = _compute_sinr_ber(simulator, H, W_st)
+            stats['rl_student_tflite']['sinr_db'].append(sinr_db)
+            stats['rl_student_tflite']['ber'].append(ber)
 
         if dqn_model is not None and dqn_artifacts is not None:
             dqn_encoder = dqn_artifacts['state_encoder']
@@ -111,33 +239,83 @@ def benchmark(num_iterations=200):
 
             t0 = time.perf_counter()
             qvals = dqn_model(dqn_state, training=False).numpy()[0]
-            beam_idx = int(np.argmax(qvals))
+            beam_idx = _rerank_beam_idx_from_qvals(
+                simulator=simulator,
+                H=H,
+                qvals=qvals,
+                codebook=dqn_codebook,
+                topk=dqn_rerank_topk,
+            )
             W_dqn = dqn_codebook.get_beam(beam_idx)
             stats['dqn_beam']['latency_ms'].append((time.perf_counter() - t0) * 1000)
             stats['dqn_beam']['capacity'].append(simulator.calculate_sum_capacity(H, W_dqn))
+            sinr_db, _, ber = _compute_sinr_ber(simulator, H, W_dqn)
+            stats['dqn_beam']['sinr_db'].append(sinr_db)
+            stats['dqn_beam']['ber'].append(ber)
 
             if dqn_interpreter is not None:
                 t0 = time.perf_counter()
                 qvals_tflite = _run_tflite(dqn_interpreter, dqn_state)[0]
-                beam_idx_tflite = int(np.argmax(qvals_tflite))
+                beam_idx_tflite = _rerank_beam_idx_from_qvals(
+                    simulator=simulator,
+                    H=H,
+                    qvals=qvals_tflite,
+                    codebook=dqn_codebook,
+                    topk=dqn_rerank_topk,
+                )
                 W_dqn_tfl = dqn_codebook.get_beam(beam_idx_tflite)
                 stats['dqn_beam_tflite']['latency_ms'].append((time.perf_counter() - t0) * 1000)
                 stats['dqn_beam_tflite']['capacity'].append(simulator.calculate_sum_capacity(H, W_dqn_tfl))
+                sinr_db, _, ber = _compute_sinr_ber(simulator, H, W_dqn_tfl)
+                stats['dqn_beam_tflite']['sinr_db'].append(sinr_db)
+                stats['dqn_beam_tflite']['ber'].append(ber)
+
+    summary = _summarize_stats(stats)
 
     print("=" * 72)
-    print("BENCHMARK: CAPACITY AND LATENCY")
+    print("BENCHMARK: CAPACITY, LATENCY, SINR, BER")
     print("=" * 72)
-    for method, d in stats.items():
-        if not d['capacity']:
+    for method, d in summary.items():
+        if d is None:
             continue
-        cap = np.array(d['capacity'])
-        lat = np.array(d['latency_ms'])
         print(
             f"{method:18s} | "
-            f"cap_mean={cap.mean():7.3f} | cap_std={cap.std():6.3f} | "
-            f"lat_mean={lat.mean():7.3f} ms | lat_p95={np.percentile(lat,95):7.3f} ms"
+            f"cap_mean={d['cap_mean']:7.3f} | cap_std={d['cap_std']:6.3f} | "
+            f"lat_mean={d['lat_mean_ms']:7.3f} ms | lat_p95={d['lat_p95_ms']:7.3f} ms | "
+            f"sinr_mean={d['sinr_mean_db']:6.2f} dB | ber_mean={d['ber_mean']:.3e}"
         )
+
+    if save_json_path is None:
+        save_json_path = os.path.join(results_dir, 'benchmark_optimized_summary.json')
+    os.makedirs(os.path.dirname(save_json_path), exist_ok=True)
+    with open(save_json_path, 'w') as f:
+        json.dump({'num_iterations': num_iterations, 'summary': summary}, f, indent=2)
+
+    return stats, summary
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument('--iterations', type=int, default=200)
+    p.add_argument('--json-out', type=str, default=None)
+    p.add_argument('--channel-source', type=str, default='simulator', choices=['simulator', 'external', 'mixed'])
+    p.add_argument('--external-registry', type=str, default='data/dataset_registry.json')
+    p.add_argument('--external-max-samples', type=int, default=20000)
+    p.add_argument('--external-mix-ratio', type=float, default=0.5)
+    p.add_argument('--dqn-rerank-topk', type=int, default=1)
+    p.add_argument('--seed', type=int, default=None)
+    return p.parse_args()
 
 
 if __name__ == '__main__':
-    benchmark()
+    args = parse_args()
+    benchmark(
+        num_iterations=args.iterations,
+        save_json_path=args.json_out,
+        channel_source=args.channel_source,
+        external_registry_path=args.external_registry,
+        external_max_samples=args.external_max_samples,
+        external_mix_ratio=args.external_mix_ratio,
+        dqn_rerank_topk=args.dqn_rerank_topk,
+        seed=args.seed,
+    )
