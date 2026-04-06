@@ -53,6 +53,47 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+## Dataset Download & Setup
+
+Large external archives are intentionally not stored in this GitHub repository due to file size limits.
+
+Required local archives:
+- `data/beam_selection.zip`
+- `data/channel_estimation.zip`
+
+### 1) Download dataset archives
+Download the two zip files from your shared source (Drive/Kaggle/OneDrive/lab storage) and place them in:
+
+```text
+beamforming-project-pipeline/data/
+```
+
+### 2) Register and extract locally
+```bash
+python pipeline/add_dataset_zip.py \
+    --zip data/beam_selection.zip \
+    --zip data/channel_estimation.zip
+```
+
+This generates:
+- `data/dataset_registry.json` (dataset manifest)
+- `data/external/` (extracted dataset contents)
+
+### 3) Run dataset-backed training/benchmark
+```bash
+python pipeline/train_dqn_beam.py --channel-source mixed --external-registry data/dataset_registry.json
+python pipeline/benchmark_optimized.py --channel-source external --external-registry data/dataset_registry.json
+```
+
+### Optional: manage large files with Git LFS
+If you need dataset archives tracked in git, use Git LFS instead of regular git blobs:
+
+```bash
+git lfs install
+git lfs track "data/*.zip"
+git add .gitattributes
+```
+
 ## Method Summary
 
 ### 1) Teacher-Derived Codebook (capacity-focused)
