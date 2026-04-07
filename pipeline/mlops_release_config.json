@@ -1,0 +1,15 @@
+{
+  "baseline_json": "results/benchmark_best_config.json",
+  "baseline_method": "dqn_beam_tflite",
+  "candidate_method": "dqn_beam_tflite",
+  "latency_budget_ms": 1.0,
+  "latency_p95_budget_ms": 2.0,
+  "min_capacity_gain": 0.0,
+  "max_ber_regression": 0.002,
+  "max_sinr_drop_db": 0.4,
+  "artifact_paths": [
+    "results/dqn_beam_model.keras",
+    "results/dqn_beam_model_int8.tflite",
+    "results/dqn_beam_artifacts.pkl"
+  ]
+}

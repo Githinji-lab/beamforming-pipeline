@@ -15,6 +15,7 @@ from simulators import BeamformingSimulatorV4
 from preprocessing import calculate_mmse_weights_adjusted
 from baselines import calculate_zf_weights_adjusted
 from external_dataset import load_channels_from_registry, ExternalChannelSampler
+import dqn_beam_agent  # registers custom Keras layers used by DQN models
 
 
 def _run_tflite(interpreter, input_data):
@@ -65,20 +66,46 @@ def _proxy_capacity_score(simulator, H, W):
     return float(np.sum(capacities))
 
 
-def _rerank_beam_idx_from_qvals(simulator, H, qvals, codebook, topk):
+def _rerank_beam_idx_from_qvals(
+    simulator,
+    H,
+    qvals,
+    codebook,
+    topk,
+    rerank_mode='capacity',
+    hybrid_q_weight=0.5,
+):
     if topk <= 1:
         return int(np.argmax(qvals))
 
     k = min(int(topk), len(qvals))
     candidate_indices = np.argpartition(qvals, -k)[-k:]
 
+    if rerank_mode == 'q_only':
+        return int(candidate_indices[np.argmax(qvals[candidate_indices])])
+
+    candidate_qvals = np.asarray(qvals[candidate_indices], dtype=np.float64)
+    proxy_scores = np.asarray(
+        [
+            _proxy_capacity_score(simulator, H, codebook.get_beam(int(idx)))
+            for idx in candidate_indices
+        ],
+        dtype=np.float64,
+    )
+
+    if rerank_mode == 'hybrid':
+        q_min, q_max = float(candidate_qvals.min()), float(candidate_qvals.max())
+        s_min, s_max = float(proxy_scores.min()), float(proxy_scores.max())
+        q_norm = (candidate_qvals - q_min) / max(q_max - q_min, 1e-9)
+        s_norm = (proxy_scores - s_min) / max(s_max - s_min, 1e-9)
+        blended = hybrid_q_weight * q_norm + (1.0 - hybrid_q_weight) * s_norm
+        return int(candidate_indices[int(np.argmax(blended))])
+
     best_idx = int(candidate_indices[0])
     best_score = -np.inf
-    for idx in candidate_indices:
-        W = codebook.get_beam(int(idx))
-        score = _proxy_capacity_score(simulator, H, W)
+    for idx, score in zip(candidate_indices, proxy_scores):
         if score > best_score:
-            best_score = score
+            best_score = float(score)
             best_idx = int(idx)
     return best_idx
 
@@ -113,6 +140,8 @@ def benchmark(
     external_max_samples=20000,
     external_mix_ratio=0.5,
     dqn_rerank_topk=1,
+    dqn_rerank_mode='capacity',
+    dqn_hybrid_q_weight=0.5,
     seed=None,
 ):
     if seed is not None:
@@ -186,6 +215,8 @@ def benchmark(
         'dqn_beam_tflite': {'capacity': [], 'latency_ms': [], 'sinr_db': [], 'ber': []},
     }
 
+    prev_h_for_dqn = None
+
     for i in range(num_iterations):
         H = sample_channel()
         snr = simulator.snr_db_list[len(simulator.snr_db_list) // 2]
@@ -235,7 +266,21 @@ def benchmark(
             dqn_encoder = dqn_artifacts['state_encoder']
             dqn_scaler = dqn_artifacts['state_scaler']
             dqn_codebook = dqn_artifacts['codebook']
-            dqn_state = dqn_scaler.transform(dqn_encoder.encode(H, snr).reshape(1, -1))
+            dqn_phase1 = dqn_artifacts.get('phase1_augmenter', None)
+            dqn_prev_h = None
+            if i > 0:
+                # Approximate temporal feature for inference-time consistency.
+                dqn_prev_h = prev_h_for_dqn
+
+            dqn_base_state = dqn_encoder.encode(H, snr)
+            if dqn_phase1 is not None:
+                dqn_base_state = dqn_phase1.transform(
+                    base_state=dqn_base_state,
+                    H=H,
+                    snr=snr,
+                    prev_H=dqn_prev_h,
+                )
+            dqn_state = dqn_scaler.transform(np.array(dqn_base_state, dtype=np.float32).reshape(1, -1))
 
             t0 = time.perf_counter()
             qvals = dqn_model(dqn_state, training=False).numpy()[0]
@@ -245,6 +290,8 @@ def benchmark(
                 qvals=qvals,
                 codebook=dqn_codebook,
                 topk=dqn_rerank_topk,
+                rerank_mode=dqn_rerank_mode,
+                hybrid_q_weight=dqn_hybrid_q_weight,
             )
             W_dqn = dqn_codebook.get_beam(beam_idx)
             stats['dqn_beam']['latency_ms'].append((time.perf_counter() - t0) * 1000)
@@ -262,6 +309,8 @@ def benchmark(
                     qvals=qvals_tflite,
                     codebook=dqn_codebook,
                     topk=dqn_rerank_topk,
+                    rerank_mode=dqn_rerank_mode,
+                    hybrid_q_weight=dqn_hybrid_q_weight,
                 )
                 W_dqn_tfl = dqn_codebook.get_beam(beam_idx_tflite)
                 stats['dqn_beam_tflite']['latency_ms'].append((time.perf_counter() - t0) * 1000)
@@ -269,6 +318,10 @@ def benchmark(
                 sinr_db, _, ber = _compute_sinr_ber(simulator, H, W_dqn_tfl)
                 stats['dqn_beam_tflite']['sinr_db'].append(sinr_db)
                 stats['dqn_beam_tflite']['ber'].append(ber)
+
+            prev_h_for_dqn = H
+        else:
+            prev_h_for_dqn = H
 
     summary = _summarize_stats(stats)
 
@@ -289,7 +342,21 @@ def benchmark(
         save_json_path = os.path.join(results_dir, 'benchmark_optimized_summary.json')
     os.makedirs(os.path.dirname(save_json_path), exist_ok=True)
     with open(save_json_path, 'w') as f:
-        json.dump({'num_iterations': num_iterations, 'summary': summary}, f, indent=2)
+        json.dump(
+            {
+                'num_iterations': num_iterations,
+                'protocol': {
+                    'channel_source': channel_source,
+                    'dqn_rerank_topk': int(dqn_rerank_topk),
+                    'dqn_rerank_mode': dqn_rerank_mode,
+                    'dqn_hybrid_q_weight': float(dqn_hybrid_q_weight),
+                    'seed': seed,
+                },
+                'summary': summary,
+            },
+            f,
+            indent=2,
+        )
 
     return stats, summary
 
@@ -303,6 +370,8 @@ def parse_args():
     p.add_argument('--external-max-samples', type=int, default=20000)
     p.add_argument('--external-mix-ratio', type=float, default=0.5)
     p.add_argument('--dqn-rerank-topk', type=int, default=1)
+    p.add_argument('--dqn-rerank-mode', type=str, default='capacity', choices=['capacity', 'hybrid', 'q_only'])
+    p.add_argument('--dqn-hybrid-q-weight', type=float, default=0.5)
     p.add_argument('--seed', type=int, default=None)
     return p.parse_args()
 
@@ -317,5 +386,7 @@ if __name__ == '__main__':
         external_max_samples=args.external_max_samples,
         external_mix_ratio=args.external_mix_ratio,
         dqn_rerank_topk=args.dqn_rerank_topk,
+        dqn_rerank_mode=args.dqn_rerank_mode,
+        dqn_hybrid_q_weight=args.dqn_hybrid_q_weight,
         seed=args.seed,
     )

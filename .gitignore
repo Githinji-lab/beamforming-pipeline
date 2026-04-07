@@ -33,5 +33,14 @@ results/*.pkl
 !results/protocol/**
 !results/sweeps/**
 
+# Large experiment outputs (do not track)
+results/hparam_sweep*/
+results/phase1*/
+results/protocol_best_config/
+results/protocol_dueling_per_best/
+results/mlops/runs/
+results/mlops/registry/
+results/mlops/releases/
+
 # Temporary model export dirs
 /tmp/

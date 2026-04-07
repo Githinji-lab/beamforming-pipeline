@@ -90,6 +90,22 @@ def _plot_objective_progress(scores, out_path):
 
 def _plot_topk_tradeoff(topk_summaries, out_path):
     topks = sorted(topk_summaries.keys())
+    if len(topks) < 2:
+        # Not enough data for a tradeoff line plot; write a simple bar chart instead
+        k = topks[0]
+        fig, ax = plt.subplots(figsize=(6, 4))
+        vals = [
+            topk_summaries[k]["dqn_beam_tflite"]["cap_mean"],
+            topk_summaries[k]["dqn_beam_tflite"]["lat_mean_ms"],
+        ]
+        ax.bar(["cap_mean", "lat_mean_ms"], vals, color=["#1f77b4", "#d62728"], alpha=0.9)
+        ax.set_title(f"DQN TFLite Metrics (top-k={k})")
+        ax.set_ylabel("Value")
+        ax.grid(True, axis="y", alpha=0.25)
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=170)
+        plt.close(fig)
+        return
     cap = [topk_summaries[k]["dqn_beam_tflite"]["cap_mean"] for k in topks]
     lat_mean = [topk_summaries[k]["dqn_beam_tflite"]["lat_mean_ms"] for k in topks]
     lat_p95 = [topk_summaries[k]["dqn_beam_tflite"]["lat_p95_ms"] for k in topks]
@@ -176,15 +192,20 @@ def main():
     results_dir = args.results_dir
     out_dir = args.out_dir
 
-    protocol_dir = _find_existing([
+    protocol_dir_candidates = [
         args.protocol_dir,
+        os.path.join(results_dir, "protocol_best_config"),
         os.path.join(results_dir, "defense", "protocol"),
-    ])
+    ]
+    try:
+        protocol_dir = _find_existing(protocol_dir_candidates)
+    except FileNotFoundError:
+        protocol_dir = None  # will skip headline/ablation CSVs gracefully
 
     if os.path.exists(out_dir):
         for name in os.listdir(out_dir):
             path = os.path.join(out_dir, name)
-            if os.path.abspath(path) == os.path.abspath(protocol_dir):
+            if protocol_dir and os.path.abspath(path) == os.path.abspath(protocol_dir):
                 continue
             if os.path.isdir(path):
                 shutil.rmtree(path)
@@ -192,15 +213,36 @@ def main():
                 os.remove(path)
     os.makedirs(out_dir, exist_ok=True)
 
-    topk_paths = {
-        1: _find_existing([os.path.join(results_dir, "benchmark_external_topk1.json")]),
-        2: _find_existing([os.path.join(results_dir, "benchmark_external_topk2.json")]),
-        3: _find_existing([os.path.join(results_dir, "benchmark_external_topk3.json")]),
-    }
+    # Resolve topk benchmark files: try external-labelled first, then simulator-labelled,
+    # then fall back to the best-config benchmark for whichever topk is missing.
+    def _topk_candidates(k):
+        return [
+            os.path.join(results_dir, f"benchmark_external_topk{k}.json"),
+            os.path.join(results_dir, f"benchmark_topk{k}.json"),
+            os.path.join(results_dir, "benchmark_best_config.json"),
+        ]
+
+    topk_paths = {}
+    for k in [1, 2, 3]:
+        try:
+            topk_paths[k] = _find_existing(_topk_candidates(k))
+        except FileNotFoundError:
+            pass  # will drop missing topk values from the tradeoff plot gracefully
+
+    if not topk_paths:
+        raise FileNotFoundError(
+            "No benchmark JSON files found for any top-k value. "
+            "Run benchmark_optimized.py first (e.g. with --json-out results/benchmark_topk2.json)."
+        )
     topk_summaries = {k: _load_summary(path) for k, path in topk_paths.items()}
 
-    headline_json = _find_existing([os.path.join(protocol_dir, "headline_aggregate.json")])
-    headline_data = _load_json(headline_json)
+    headline_json = None
+    if protocol_dir:
+        try:
+            headline_json = _find_existing([os.path.join(protocol_dir, "headline_aggregate.json")])
+        except FileNotFoundError:
+            pass
+    headline_data = _load_json(headline_json) if headline_json else {}
 
     selected_topk = max(
         topk_summaries.keys(),
@@ -223,6 +265,8 @@ def main():
     _plot_method_comparison(selected_summary, os.path.join(out_dir, "selected_method_comparison.png"))
 
     for filename in ["headline_table.csv", "ablation_table.csv", "results_claims.txt"]:
+        if protocol_dir is None:
+            break
         src = os.path.join(protocol_dir, filename)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(out_dir, filename))

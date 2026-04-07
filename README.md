@@ -156,6 +156,20 @@ python pipeline/train_dqn_beam.py \
     --external-max-samples 5000
 ```
 
+### Phase-1 training (richer features + clustering + constrained reward)
+```bash
+python pipeline/train_dqn_beam.py \
+    --episodes 30 \
+    --steps 30 \
+    --batch-size 32 \
+    --channel-source external \
+    --external-registry data/dataset_registry.json \
+    --external-max-samples 5000 \
+    --phase1-enable \
+    --phase1-num-clusters 4 \
+    --reward-mode constrained
+```
+
 Channel source options:
 - `simulator`: synthetic channels only (default)
 - `external`: channels from `data/dataset_registry.json`
@@ -187,6 +201,56 @@ Benchmark now reports (per method):
 - SINR mean (dB)
 - BER mean
 
+### Phase-1 ablation (baseline vs phase1)
+```bash
+python pipeline/run_phase1_ablation.py \
+    --out-dir results/phase1 \
+    --train-episodes 20 \
+    --train-steps 30 \
+    --bench-iterations 40 \
+    --channel-source external \
+    --external-registry data/dataset_registry.json \
+    --phase1-num-clusters 4
+```
+
+Outputs:
+- `results/phase1/benchmark_baseline.json`
+- `results/phase1/benchmark_phase1.json`
+- `results/phase1/phase1_ablation_table.csv`
+- `results/phase1/phase1_ablation_summary.json`
+
+### Hyperparameter sweep (rank by quality under latency budget)
+```bash
+python pipeline/run_hyperparameter_sweep.py \
+    --out-dir results/hparam_sweep \
+    --train-episodes 12 \
+    --train-steps 20 \
+    --bench-iterations 30 \
+    --channel-source simulator \
+    --phase1-enable \
+    --reward-mode constrained \
+    --learning-rates 1e-4,3e-4 \
+    --epsilon-decays 0.994,0.996 \
+    --codebook-keep-ratios 0.25,0.35 \
+    --phase1-clusters 2,4 \
+    --topk-values 1,2
+
+# Optional advanced DQN variants:
+#   --dueling-dqn
+#   --prioritized-replay --priority-alpha 0.6 --priority-beta-start 0.4 --priority-beta-increment 1e-4
+```
+
+Sweep outputs:
+- `results/hparam_sweep/sweep_ranked.csv`
+- `results/hparam_sweep/best_config.json`
+- `results/hparam_sweep/sweep_grid.json`
+- `results/hparam_sweep/<run_name>/benchmark_summary.json`
+
+Selection rule:
+- prioritize rows where `latency_feasible=1`
+- among feasible rows, prefer higher `score`
+- inspect `cap_mean`, `sinr_mean_db`, and `ber_mean` before finalizing
+
 ### Quick smoke test
 ```bash
 python pipeline/train_dqn_beam.py \
@@ -195,6 +259,8 @@ python pipeline/train_dqn_beam.py \
     --batch-size 16 \
     --imitation-samples 60 \
     --imitation-epochs 1 \
+    --dueling-dqn \
+    --prioritized-replay \
     --codebook-strategy teacher_top \
     --codebook-keep-ratio 0.25
 ```
@@ -242,6 +308,68 @@ Then build the clean defense package:
 ```bash
 python pipeline/prepare_defense_results.py
 ```
+
+## MLOps Release Workflow (project finalization)
+
+Use `pipeline/run_mlops_release.py` to run an end-to-end release process:
+- optional training,
+- optional benchmark,
+- gate evaluation against a baseline,
+- optional promotion to a local model registry.
+
+Default gate config is in:
+- `pipeline/mlops_release_config.json`
+
+### 1) Release an existing candidate (fast path)
+```bash
+python pipeline/run_mlops_release.py \
+    --skip-train \
+    --skip-benchmark \
+    --candidate-benchmark-json results/benchmark_dueling_per_best.json \
+    --baseline-json results/benchmark_best_config.json \
+    --model-name dqn_beam_release \
+    --promote-on-pass
+```
+
+### 2) Full release run (train + benchmark + gate + promote)
+```bash
+python pipeline/run_mlops_release.py \
+    --model-name dqn_beam_release \
+    --channel-source simulator \
+    --train-episodes 80 \
+    --train-steps 50 \
+    --phase1-enable \
+    --phase1-num-clusters 2 \
+    --reward-mode constrained \
+    --learning-rate 3e-4 \
+    --epsilon-decay 0.994 \
+    --codebook-keep-ratio 0.35 \
+    --dueling-dqn \
+    --prioritized-replay \
+    --benchmark-iterations 200 \
+    --dqn-rerank-topk 2 \
+    --dqn-rerank-mode hybrid \
+    --dqn-hybrid-q-weight 0.65 \
+    --promote-on-pass
+```
+
+### Release outputs
+Each run writes:
+- `results/mlops/runs/<run_id>/run_manifest.json` (full reproducibility manifest)
+- `results/mlops/runs/<run_id>/release_report.json` (gate + promotion report)
+
+If gate passes and promotion is enabled:
+- `results/mlops/registry/<model_name>/<run_id>/...` (copied artifacts + benchmark + manifest)
+- `results/mlops/registry/<model_name>/index.json` (version index + latest pointer)
+
+### Default gate checks
+- capacity non-decrease vs baseline
+- mean latency under budget (`lat_mean_ms <= 1.0`)
+- p95 latency under budget (`lat_p95_ms <= 2.0`)
+- BER regression limited (`<= 0.002` absolute)
+- SINR drop limited (`<= 0.4 dB`)
+
+Tune thresholds in `pipeline/mlops_release_config.json`.
 
 This creates a clean folder `results/defense/` with:
 - `primary_benchmark_protocol.json` (locked protocol settings)

@@ -172,3 +172,59 @@ def calculate_multi_objective_reward(H, W, simulator_instance,
         'over_budget_ms': over_budget_ms,
         'budget_latency_penalty': budget_latency_penalty
     }
+
+
+def calculate_constrained_quality_reward(
+    H,
+    W,
+    simulator_instance,
+    cap_weight=0.75,
+    sinr_weight=0.25,
+    ber_weight=0.15,
+    latency_violation_weight=1.2,
+    latency_budget_ms=1.0,
+    inference_latency_ms=0.0,
+):
+    path_loss_db = simulator_instance.calculate_path_loss_3gpp()
+    path_loss_linear = 10 ** (-path_loss_db / 10)
+
+    capacities = []
+    sinrs = []
+
+    K = H.shape[0]
+    for k in range(K):
+        sig = simulator_instance.P_tx_linear * path_loss_linear * np.abs(H[k, :] @ W[:, k]) ** 2
+        intf = sum(
+            simulator_instance.P_tx_linear * path_loss_linear * np.abs(H[k, :] @ W[:, j]) ** 2
+            for j in range(K)
+            if j != k
+        )
+        sinr = float(sig / (intf + simulator_instance.noise_power_linear + 1e-10))
+        sinrs.append(sinr)
+        capacities.append(np.log2(1.0 + sinr))
+
+    throughput = float(np.sum(capacities))
+    avg_sinr = float(np.mean(sinrs))
+    avg_sinr_db = float(10.0 * np.log10(avg_sinr + 1e-10))
+    ber = float(np.mean(0.5 * np.exp(-np.array(sinrs, dtype=np.float64))))
+
+    over_budget_ms = max(0.0, float(inference_latency_ms) - float(latency_budget_ms))
+    violation_penalty = latency_violation_weight * (over_budget_ms ** 2)
+
+    reward = (
+        cap_weight * throughput
+        + sinr_weight * np.log1p(max(avg_sinr, 0.0))
+        - ber_weight * ber
+        - violation_penalty
+    )
+
+    return reward, {
+        "throughput": throughput,
+        "avg_sinr": avg_sinr,
+        "avg_sinr_db": avg_sinr_db,
+        "ber": ber,
+        "inference_latency_ms": float(inference_latency_ms),
+        "latency_budget_ms": float(latency_budget_ms),
+        "over_budget_ms": over_budget_ms,
+        "violation_penalty": violation_penalty,
+    }

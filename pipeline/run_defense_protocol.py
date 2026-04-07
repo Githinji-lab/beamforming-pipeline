@@ -103,15 +103,20 @@ def _run_repeated_benchmark(protocol, seeds, out_dir, tag):
             external_max_samples=protocol["external_max_samples"],
             external_mix_ratio=protocol["external_mix_ratio"],
             dqn_rerank_topk=protocol["dqn_rerank_topk"],
+            dqn_rerank_mode=protocol["dqn_rerank_mode"],
+            dqn_hybrid_q_weight=protocol["dqn_hybrid_q_weight"],
             seed=seed,
         )
         run_summaries.append(summary)
     return _aggregate_run_summaries(run_summaries)
 
 
-def _run_topk_dataset_ablation(base_protocol, seeds, out_dir):
+def _run_topk_dataset_ablation(base_protocol, seeds, out_dir, skip_external=False):
     rows = []
     for channel_source, dataset_on in [("simulator", 0), ("external", 1)]:
+        if skip_external and channel_source == "external":
+            print(f"[ablation] Skipping external-dataset variant (--skip-external-ablation set).")
+            continue
         for topk in [1, 2, 3]:
             protocol = deepcopy(base_protocol)
             protocol["channel_source"] = channel_source
@@ -218,7 +223,11 @@ def parse_args():
     parser.add_argument("--external-max-samples", type=int, default=5000)
     parser.add_argument("--external-mix-ratio", type=float, default=0.5)
     parser.add_argument("--dqn-rerank-topk", type=int, default=3)
+    parser.add_argument("--dqn-rerank-mode", type=str, default="capacity", choices=["capacity", "hybrid", "q_only"])
+    parser.add_argument("--dqn-hybrid-q-weight", type=float, default=0.5)
 
+    parser.add_argument("--skip-external-ablation", action="store_true",
+                        help="Skip the external-dataset variant in the topk ablation (use when external registry is unavailable).")
     parser.add_argument("--run-teacher-ratio-ablation", action="store_true")
     parser.add_argument("--teacher-ratios", type=str, default="0.20,0.30,0.35")
     parser.add_argument("--ablation-train-episodes", type=int, default=20)
@@ -243,6 +252,8 @@ def main():
         "external_max_samples": int(args.external_max_samples),
         "external_mix_ratio": float(args.external_mix_ratio),
         "dqn_rerank_topk": int(args.dqn_rerank_topk),
+        "dqn_rerank_mode": args.dqn_rerank_mode,
+        "dqn_hybrid_q_weight": float(args.dqn_hybrid_q_weight),
     }
 
     headline_agg = _run_repeated_benchmark(protocol, seeds, args.out_dir, "headline")
@@ -258,7 +269,8 @@ def main():
         )
     _write_headline_table(headline_agg, os.path.join(args.out_dir, "headline_table.csv"))
 
-    ablation_rows = _run_topk_dataset_ablation(protocol, seeds, args.out_dir)
+    ablation_rows = _run_topk_dataset_ablation(protocol, seeds, args.out_dir,
+                                                skip_external=args.skip_external_ablation)
 
     if args.run_teacher_ratio_ablation:
         teacher_ratios = _parse_float_list(args.teacher_ratios)
