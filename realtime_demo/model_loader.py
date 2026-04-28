@@ -9,13 +9,18 @@ from typing import Optional, Tuple
 import numpy as np
 import tensorflow as tf
 
+# Define a patched Dense layer to handle the Keras 3 versioning bug
+# This strips the 'quantization_config' key that causes the ValueError
+class PatchedDense(tf.keras.layers.Dense):
+    def __init__(self, *args, **kwargs):
+        kwargs.pop('quantization_config', None)
+        super().__init__(*args, **kwargs)
 
 def _ensure_src_on_path(project_root: str) -> str:
     src_path = os.path.join(project_root, "src")
     if src_path not in sys.path:
         sys.path.insert(0, src_path)
     return src_path
-
 
 @dataclass
 class RealtimeBeamModel:
@@ -58,7 +63,6 @@ class RealtimeBeamModel:
         qvals = self.model(state, training=False).numpy()[0]
         return np.asarray(qvals, dtype=np.float32)
 
-
 def _proxy_capacity_score(simulator, H: np.ndarray, W: np.ndarray) -> float:
     capacities = []
     K = H.shape[0]
@@ -71,7 +75,6 @@ def _proxy_capacity_score(simulator, H: np.ndarray, W: np.ndarray) -> float:
         )
         capacities.append(np.log2(1.0 + sig / (intf + simulator.noise_power_linear + 1e-10)))
     return float(np.sum(capacities))
-
 
 def select_beam_index_from_qvals(
     qvals: np.ndarray,
@@ -107,13 +110,11 @@ def select_beam_index_from_qvals(
 
     return int(candidate_indices[int(np.argmax(proxy_scores))])
 
-
 def estimate_signal_metrics(simulator, H: np.ndarray, W: np.ndarray) -> Tuple[float, float]:
     sinrs = compute_user_sinr_linear(simulator, H, W)
     sinr_db = float(10.0 * np.log10(np.mean(sinrs) + 1e-10))
     strength = float(np.mean(np.abs(H @ W) ** 2))
     return sinr_db, strength
-
 
 def compute_user_sinr_linear(simulator, H: np.ndarray, W: np.ndarray) -> np.ndarray:
     path_loss_linear = 10 ** (-simulator.calculate_path_loss_3gpp() / 10)
@@ -129,11 +130,9 @@ def compute_user_sinr_linear(simulator, H: np.ndarray, W: np.ndarray) -> np.ndar
         sinrs.append(float(sig / (intf + simulator.noise_power_linear + 1e-10)))
     return np.asarray(sinrs, dtype=np.float64)
 
-
 def compute_user_sinr_db(simulator, H: np.ndarray, W: np.ndarray) -> np.ndarray:
     sinr_linear = compute_user_sinr_linear(simulator, H, W)
     return 10.0 * np.log10(sinr_linear + 1e-10)
-
 
 def load_realtime_bundle(
     project_root: str,
@@ -173,8 +172,12 @@ def load_realtime_bundle(
         if not os.path.exists(resolved_model_path):
             raise FileNotFoundError(f"Model not found: {resolved_model_path}")
         
-        # APPLY FIX HERE: Add compile=False
-        model = tf.keras.models.load_model(resolved_model_path, compile=False)
+        # We load with PatchedDense as a custom object to ignore version-mismatched keys
+        model = tf.keras.models.load_model(
+            resolved_model_path, 
+            custom_objects={"Dense": PatchedDense},
+            compile=False
+        )
 
     with open(resolved_artifacts_path, "rb") as f:
         artifacts = pickle.load(f)
