@@ -172,7 +172,9 @@ def load_realtime_bundle(
     else:
         if not os.path.exists(resolved_model_path):
             raise FileNotFoundError(f"Model not found: {resolved_model_path}")
-        model = tf.keras.models.load_model(resolved_model_path)
+        
+        # APPLY FIX HERE: Add compile=False
+        model = tf.keras.models.load_model(resolved_model_path, compile=False)
 
     with open(resolved_artifacts_path, "rb") as f:
         artifacts = pickle.load(f)
